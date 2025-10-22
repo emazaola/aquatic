@@ -1,2 +1,2 @@
-# aquatic
-R scripts to work with remote sensing index in aquatic environments
+# ocean
+remote senssing analysis to sea environments

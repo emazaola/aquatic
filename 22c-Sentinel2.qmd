@@ -1,0 +1,92 @@
+# RSI EMBALSE CERRÓN GRANDE
+
+## Cargar librerías
+
+
+```{r setup, include=FALSE}
+# knitr::opts_chunk$set(eval = FALSE)
+```
+
+```{r pacman, include=TRUE, warning = FALSE, message = FALSE, echo=FALSE}
+# install.packages("pacman")
+
+pacman::p_load(
+  rsi,
+  sf,
+  terra, 
+  tidyterra, 
+  tidyverse,
+    # gganimate, 
+    # gstat,
+    DT, 
+  mapview,
+  patchwork
+)
+
+#para leer listas
+# library(listviewerlite)
+library(rsi)
+library(terra)
+```
+
+## Área de estudio 
+
+```{r aoi-22}
+aoi <- st_read("../../data/geodata/suchitoto/Embalse Cerrón Grande.geojson")
+```
+
+
+```{r aoi_utm1}
+
+
+# Calcular la zona UTM automáticamente (hemisferio norte)
+lon <- st_coordinates(st_centroid(aoi))[1]
+utm_zone <- floor((lon + 180) / 6) + 1
+epsg_code <- paste0("326", sprintf("%02d", utm_zone))  # 327 para hemisferio sur
+
+```
+
+Reproyectar
+
+```{r}
+aoi_utm <- st_transform(aoi, crs = as.numeric(epsg_code))
+
+```
+
+
+### Seleccionar las bandas de interés
+
+Para cada índice vamos a necesitar unas bandas diferentes
+
+RGB: 4,3,2
+NDVI: 8, 4
+NDWI: 8, 3
+NDMI: 8A, 11
+
+```{r sel_bands}
+sel_bands <- sentinel2_band_mapping$planetary_computer_v1[c("B02", "B03", "B04", "B08", "B11")]
+```
+
+
+-------
+## Identificar rutas de Sentinel 2
+Cargar la capa de grillas de Sentinel 2 en QGIS y hacer clik en la zona de interés.
+
+```{r}
+TILE_ID_DESEADO <- "16PBA"
+```
+
+
+```{r}
+aoi_s2 <- get_sentinel2_imagery(
+  aoi = aoi_utm,
+  start_date = "2025-05-15",
+  end_date = "2025-06-15",
+  asset_names = sel_bands,
+  composite_function = NULL,
+  output_filename = glue::glue("{tempdir()}/sentinel.tif"),
+  tile_id = "16PBA"   # 👈 Solo descarga imágenes de esta tile
+)
+
+```
+

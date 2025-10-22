@@ -1,0 +1,44 @@
+# Embalse Cerrón Grande
+
+En 2025 el embalse de Cerrón Grande de EL Salvador, tuvo inasión de plantas acuáticas.
+
+## Área de Estudio
+
+Hay 2 opciones: - Analizar el embalse en su conjunto. - Analizar una zona del embalse
+
+Inicialmente, se opta por analizar el embalse en su conjunto. Si hubiera alguna zona de especial interés se plantería también su análisis específico.
+
+### Límites del AOI
+
+Para obtener un archivo en formato vectorial de embalse se recurre a la web [**Gimme Geodata BETA**](https://hanshack.com/geotools/gimmegeodata/).
+
+Se escribre el nombre que se busca: Cerrón Grande. Se descarga como geojoson Se guarda en la carpeta de datos/geodata (En este trabajo añadimos la carpeta *Suchitoto*).
+
+
+
+```{r library-20}
+pacman::p_load(
+ # rsi,
+  sf,
+  terra, 
+  tidyterra, 
+  tidyverse,
+    # gganimate, 
+    # gstat,
+    DT, 
+  mapview,
+  patchwork
+)
+```
+
+
+```{r aoi-20}
+aoi <- st_read("../../data/geodata/suchitoto/Embalse Cerrón Grande.geojson")
+
+```
+
+```{r map_aoi-20}
+mapview(aoi)
+```
+
+

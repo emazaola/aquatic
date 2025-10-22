@@ -1,0 +1,78 @@
+# RSI
+
+## El paquete rsi
+
+La página de rsi está aquí:
+
+[rsi](https://permian-global-research.github.io/rsi/)
+
+Además, hay otras páginas que pueden servir de ayuda y ejemplo.
+
+## Instalación
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+knitr::opts_chunk$set(comment = NA)
+
+knitr::opts_knit$set(root.dir = dirname(rprojroot::find_rstudio_root_file()))
+
+```
+
+```{r instal_rsi}
+# install.packages("rsi")
+
+# install.packages("pak")
+# pak::pak("Permian-Global-Research/rsi")
+
+```
+
+
+## ÍNDICES ESPECTRALES
+
+```{r load_rsi_lib}
+library(rsi)
+library(tidyverse)
+library(DT)
+```
+
+
+```{r index_list}
+index_list <- spectral_indices()
+names(index_list)
+```
+
+
+
+```{r}
+names(index_list) <- c("Dominio", "Bands","contributor" ,"date_of_addition" ,
+                       "Formula"  ,"Name" , "Platforms", "reference" ,
+                       "Nombre")
+```
+
+```{r}
+unique(index_list$Dominio)
+```
+
+
+
+```{r index_table}
+index_list |> 
+  select(c( "Nombre","Name", "Formula","Dominio", "Bands" ,  "Platforms"  )) |> 
+  datatable(options = list(pageLength = 15, 
+                         scrollX = TRUE),
+              filter = 'top',
+              rownames = FALSE) |> 
+        formatStyle(columns = c(1:6), fontSize = '70%')|>
+        formatStyle(columns = c(1,4,5),
+                    color = 'brown',
+                    width = '5%') |> 
+        formatStyle(columns = c(2, 6),
+                    #color = 'brown',
+                    width = '45%'
+                    )
+  
+```
+
+

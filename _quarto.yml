@@ -1,0 +1,51 @@
+project:
+  type: book
+  output-dir: "../docs"
+
+
+book:
+  title: "Aquatic Applications"
+  author: "Gisarte"
+  date: "2025-10-16"
+  # date-format: "%Y, %m, %d"
+  chapters:
+    - index.qmd
+    - part: "ASPECTOS GENERALES"
+      chapters:
+      - 01-intro.qmd
+    - part: "ÍNDICES ACUÁTICOS"
+      chapters:
+      - 10-spectral_index.qmd
+      - 20-AOI.qmd
+      - 21-Sentinel2_aqua.qmd
+      - 22-Sentinel2.qmd
+    - part: "PALABRAS FINALES"
+      chapters:
+      - summary.qmd
+      - references.qmd
+
+bibliography: references.bib
+
+format:
+  html:
+    css: custom.css
+    theme: flatly
+    toc: true
+    toc-depth: 2
+    number-sections: true
+
+editor: source  
+ 
+lang: es
+language:
+  en:
+    toc-title-document: "Table of contents"
+    title-block-author-single: "Author"
+    title-block-author-plural: "Authors"
+  es:
+    toc-title-document: "Tabla de contenidos"
+    title-block-author-single: "Autor"
+    title-block-author-plural: "Autores"
+
+
+

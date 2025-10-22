@@ -1,0 +1,14 @@
+# Introducción
+
+## Aquatic Applications
+
+
+## Proceso
+
+Cálculo de índices espectrales de acuáticos, de vegetación, hídricos e incendios,
+Cálculo de los valores medios para el tiempo de estudio.
+Cálculo de los valores individuales por fecha.
+Gifts animados para cada índice.
+
+Pendiente
+Cálculo de las anomalías

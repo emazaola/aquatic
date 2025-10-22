@@ -1,0 +1,1564 @@
+# RSI EMBALSE CERRÓN GRANDE
+
+## Cargar librerías
+
+
+```{r setup, include=FALSE}
+# knitr::opts_chunk$set(eval = FALSE)
+```
+
+```{r pacman, include=TRUE, warning = FALSE, message = FALSE, echo=FALSE}
+# install.packages("pacman")
+
+pacman::p_load(
+  rsi,
+  sf,
+  terra, 
+  tidyterra, 
+  tidyverse,
+    # gganimate, 
+    # gstat,
+    DT, 
+  mapview,
+  patchwork
+)
+
+#para leer listas
+# library(listviewerlite)
+
+```
+
+## Área de estudio 
+
+```{r aoi-22}
+aoi <- st_read("../../data/geodata/suchitoto/Embalse Cerrón Grande.geojson")
+```
+
+
+```{r aoi_utm1}
+
+
+# Calcular la zona UTM automáticamente (hemisferio norte)
+lon <- st_coordinates(st_centroid(aoi))[1]
+utm_zone <- floor((lon + 180) / 6) + 1
+epsg_code <- paste0("326", sprintf("%02d", utm_zone))  # 327 para hemisferio sur
+
+```
+
+Reproyectar
+
+```{r}
+aoi_utm <- st_transform(aoi, crs = as.numeric(epsg_code))
+
+```
+
+
+### Seleccionar las bandas de interés
+
+Para cada índice vamos a necesitar unas bandas diferentes
+
+FAI: 4, 8A, 11
+NDAVI: 2, 8A
+NTDI: 3, 4
+NDCI: 4, 5
+MCI: 4, 5, 6
+
+MDWI: 3, 11  ==> WATER MASK
+
+RGB: 4,3,2
+NDVI: 8, 4
+NDWI: 8, 3
+NDMI: 8A, 11
+
+```{r}
+sentinel2_band_mapping
+```
+
+
+
+```{r sel_bands}
+sel_bands <- sentinel2_band_mapping$planetary_computer_v1[c("B02", "B03", "B04", "B05", "B06", "B08", "B8A","B11")]
+```
+
+-------
+Capas individualizadas
+
+```{r aoi_s2T}
+aoi_s2 <- get_sentinel2_imagery(
+  aoi             = aoi_utm,
+  start_date      = "2025-05-15",
+  end_date        = "2025-06-15",
+  asset_names     = sel_bands,
+  composite_function = NULL, #para que no agrupe los valores en un único raster
+  output_filename = glue::glue("{tempdir()}/sentinel.tif")
+)
+```
+
+```{r}
+# print(class(aoi_s2))
+print(head(aoi_s2,3)) # Esto te dará más detalles sobre la estructura
+```
+Cada elemento está sin nombre
+
+```{r}
+names(aoi_s2)
+```
+
+### Rutas y fechas
+Se identifica la ruta donde se encuentran esos archivos temporales desgargados.
+
+```{r}
+# Lista de archivos TIFF descargados
+rutas_tif <- aoi_s2
+rutas_tif
+```
+
+
+Puede que se descarguen varias imágenes por fecha. Hay que evitar duplicidades.
+
+```{r}
+# Filtrar archivos válidos: terminan en 'Z.tif'
+rutas_tif_filtradas <- rutas_tif[grepl("Z\\.tif$", rutas_tif)]
+rutas_tif_filtradas
+```
+
+```{r}
+
+S2 <-terra::rast(rutas_tif_filtradas)
+
+head(S2)
+```
+
+```{r}
+S2
+```
+
+
+Se usa solo la parte correspondiente a la AOI
+
+```{r}
+S2<- S2 |> 
+# crop(aoi)|>
+  mask(aoi_utm)
+```
+
+
+
+```{r}
+names(S2)
+```
+
+
+```{r}
+# 1. Extraer las fechas de los archivos
+# Repetimos el patrón de fecha (YYYY-MM-DD) para cada banda dentro de ese archivo.
+
+# Hay length(sel_bands) bandas por archivo .
+
+
+num_bandas_por_archivo <- length(sel_bands) # Confirma este número (B, G, R, N, S1)
+```
+
+
+```{r}
+# Extraer solo la fecha de los nombres de archivo
+fechas_archivos <- str_extract(basename(rutas_tif_filtradas), "\\d{4}-\\d{2}-\\d{2}")
+fechas_archivos
+```
+
+
+```{r}
+# Repetir cada fecha 5 veces (una vez por banda) para igualar el número total de capas en S2
+fechas_capas <- rep(fechas_archivos, each = num_bandas_por_archivo)
+fechas_capas
+
+```
+
+
+
+
+```{r}
+# Crear el data frame de metadatos de las capas
+df_metadatos <- data.frame(
+  capa_indice = 1:nlyr(S2),          # El índice de la capa dentro del stack S2
+  banda_nombre = names(S2),           # B, G, R, N, S1, B, G, R, N, S1...
+  fecha = fechas_capas                # La fecha de esa capa
+)
+
+```
+
+
+```{r}
+# Visualizar el resultado (solo las primeras filas)
+head(df_metadatos,10)
+```
+
+```{r}
+names (df_metadatos)
+```
+
+```{r}
+# Crear los nombres combinando banda_nombre y fecha
+nombres_capas <- paste(df_metadatos$banda_nombre,
+                       df_metadatos$fecha,
+                       sep = "_")
+
+# Asignar los nombres al stack raster
+names(S2) <- nombres_capas
+
+# Verificar que los nombres se asignaron correctamente
+
+head(names(S2),10)  # Ver las primeras capas
+```
+
+```{r}
+df_metadatos$nombre <- names(S2)
+```
+
+
+
+```{r}
+# 2. Identificar las bandas-fechas que tienen múltiples imágenes
+bandas_duplicadas <- df_metadatos %>%
+  group_by(banda_nombre, fecha) %>%
+  filter(n() > 1) %>%
+  pull(fecha) %>%
+  unique()
+
+
+bandas_duplicadas
+```
+
+
+
+```{r}
+# Función específica para mosaic con múltiples capas
+mosaic_multiple <- function(capas_list) {
+  if(length(capas_list) == 1) {
+    return(capas_list[[1]])
+  }
+  
+  resultado <- capas_list[[1]]
+  for(i in 2:length(capas_list)) {
+    resultado <- mosaic(resultado, capas_list[[i]], fun = "mean")
+  }
+  return(resultado)
+}
+
+procesar_banda_mosaic <- function(indices) {
+  if(length(indices) == 1) {
+    capa <- S2[[indices]]
+    names(capa) <- df_metadatos$nombre[indices[1]]
+    return(capa)
+  } else {
+    cat("Procesando mosaic para fecha:", df_metadatos$nombre[indices[1]], 
+        "-", length(indices), "imágenes\n")
+    
+    capas_list <- lapply(indices, function(i) S2[[i]])
+    mosaic_resultado <- mosaic_multiple(capas_list)
+    names(mosaic_resultado) <- df_metadatos$nombre[indices[1]]
+    
+    return(mosaic_resultado)
+  }
+}
+
+# Aplicar
+grupos <- split(1:nrow(df_metadatos), df_metadatos$nombre)
+bandas_unicas <- lapply(grupos, procesar_banda_mosaic)
+bandas_unicas$`B_2025-05-15`
+
+names(bandas_unicas)
+
+S2_mosaic <- rast(bandas_unicas)
+
+S2_mosaic
+```
+
+
+
+
+Se corrigen las imágenes por el factor de Sentinel2
+
+```{r}
+s2_stack <- S2_mosaic/10000  
+```
+
+
+```{r}
+plot(s2_stack$`S1_2025-06-14`)
+```
+
+## Creación de los stacks raster
+
+Se extraen los nombres delas capas
+```{r}
+# Extraer nombres de capas
+capas <- names(s2_stack)
+head(capas,10)
+```
+Se comprueba que las fechas de las capas son únicas
+
+```{r}
+# Extraer fechas únicas desde los nombres de capa
+fechas <- unique(sub(".*_(\\d{4}-\\d{2}-\\d{2})$", "\\1", capas))
+fechas
+```
+
+```{r}
+# Crear lista de SpatRaster por fecha, manteniendo nombres originales
+S2_serie <- lapply(fechas, function(f) {
+  # Buscar capas con esa fecha
+  capas_fecha <- grep(paste0("_", f, "$"), capas, value = TRUE)
+  
+  # Subset del raster
+  r <- s2_stack[[capas_fecha]]
+  
+  # Mantener nombres tal como están
+  return(r)
+})
+
+
+
+# S2_serie
+```
+
+
+
+```{r}
+# Nombrar cada elemento con S2_yyyy-mm-dd
+names(S2_serie) <- paste0("S2_", fechas)
+
+```
+
+
+
+### Guardar capas agrupadas por fecha
+```{r}
+
+#Crear carpeta si no existe
+dir.create("../../process/geoprocess/s2_stacks/", recursive = TRUE, showWarnings = FALSE)
+
+```
+
+
+```{r}
+# Usar bucle con writeRaster de terra (mejor que lapply si se quiere más control)
+for (nombre in names(S2_serie)) {
+  archivo <- file.path("../../process/geoprocess/s2_stacks/",
+                       paste0(nombre, ".tif"))
+  
+  terra::writeRaster(S2_serie[[nombre]], archivo, overwrite = TRUE)
+}
+```
+
+
+## Visualización RGB
+```{r}
+names(S2_serie$`S2_2025-05-22`)
+```
+
+Para RGB, las bandas roja, verde y azul deben coincidir con sus canales.
+
+
+```{r plot_rgb}
+## Visualize RGB
+plotRGB(
+    S2_serie$`S2_2025-06-14`,
+  5, 2, 1,
+  scale   = 255,
+  stretch = "lin"
+)
+
+```
+
+
+
+
+```{r}
+for (f in names(S2_serie)[1:length(S2_serie)]) {
+  terra::plotRGB(S2_serie[[f]],
+                 5, 2, 1, scale = 255,
+                 stretch = "lin",
+                 main = f)
+}
+
+```
+
+
+
+### Guardar imágenes creadas
+
+Guardar como tif
+
+Crear la carpeta para las imágenes
+
+```{r}
+# Crear carpeta si no existe
+dir.create("../../process/images/RGB/", recursive = TRUE, showWarnings = FALSE)
+```
+
+
+Guardar cada imagen RGB como tif
+
+```{r}
+# Guardar cada imagen RGB
+for (nombre in names(S2_serie)) {
+  
+  # Extraer fecha del nombre (S2_2023-08-14 → 2023-08-14)
+  fecha <- sub("S2_", "", nombre)
+  
+  # Extraer bandas RGB por nombre exacto (R, G, B en orden 3,2,1)
+  raster_rgb <- S2_serie[[nombre]][[c(
+    paste0("R_", fecha),
+    paste0("G_", fecha),
+    paste0("B_", fecha)
+  )]]
+  
+  # Guardar con nombre: RGB_yyyy-mm-dd.tif
+  archivo_salida <- file.path("../../process/images/RGB/", paste0("RGB_", fecha, ".tif"))
+  
+  terra::writeRaster(raster_rgb, archivo_salida, overwrite = TRUE)
+}
+```
+
+
+
+Guardar como png
+
+```{r}
+# Crear carpeta si no existe
+dir.create("../../process/images/RGB-png/", recursive = TRUE, showWarnings = FALSE)
+
+```
+
+
+```{r}
+# Guardar cada imagen RGB como .png
+for (nombre in names(S2_serie)) {
+  
+  fecha <- sub("S2_", "", nombre)
+  
+  # Extraer bandas en orden R, G, B
+  raster_rgb <- S2_serie[[nombre]][[c(
+    paste0("R_", fecha),
+    paste0("G_", fecha),
+    paste0("B_", fecha)
+  )]]
+  
+  # Archivo de salida
+  archivo_png <- file.path("../../process/images/RGB-png/",
+                           paste0("RGB_", fecha, ".png"))
+  
+  # Abrir dispositivo PNG
+  png(filename = archivo_png, width = 800, height = 800)
+  
+  # Plot RGB con stretch lineal
+  terra::plotRGB(
+    raster_rgb,
+    r = 1, g = 2, b = 3,
+    scale   = 255,
+    stretch = "lin",
+    main    = paste("RGB -", fecha)
+  )
+  
+  dev.off()
+}
+```
+
+
+## INDICES ACUATICOS
+
+### ---------------------------------
+
+```{r}
+# Función: Calcula índices de vegetación
+calcular_indices_aqua <- function(stack) {
+  
+  # Extraer fechas únicas
+  fechas <- unique(str_extract(names(stack), "\\d{4}-\\d{2}-\\d{2}"))
+  
+  # Inicializar listas de resultados
+  MDWI_list <- list()
+  NDCI_list <- list()
+  baseline_NIR <- list()
+  baseline_B5 <- list()
+  FAI_list <- list()
+  MCI_list <- list()
+  NDTI_list <- list()
+  NDAVI_list <- list()
+  
+  
+  
+  nombres_mdwi <- c()
+  nombres_ndci <- c()
+  nombres_fai <- c()
+  nombres_mci <- c()
+  nombres_ndti <- c()
+  nombres_ndavi <- c()
+  
+  
+  for (fecha in fechas) {
+    # Extraer bandas
+    B <- stack[[paste0("B_", fecha)]]
+    G <- stack[[paste0("G_", fecha)]]
+    R <- stack[[paste0("R_", fecha)]]
+    N <- stack[[paste0("N_", fecha)]]
+    N2 <- stack[[paste0("N2_", fecha)]]
+    RE1 <- stack[[paste0("RE1_", fecha)]]
+    RE2 <- stack[[paste0("RE2_", fecha)]]
+    S1 <- stack[[paste0("S1_", fecha)]]
+    
+    # MDWI
+#     mdwi <- (G - S1) / (G + S1)
+#     names(mdwi) <- paste0("MDWI_", fecha)
+#     MDWI_list[[fecha]] <- mdwi
+    
+    # NDCI
+    ndci <- (RE1 - R) / (RE1 +  R )
+    names(ndci) <- paste0("NDCI_", fecha)
+    NDCI_list[[fecha]] <- ndci
+    
+    # FAI
+    
+    # Simplified FAI (approx): 
+      # following Hu (2009) approach — baseline interpolation for NIR
+      # baseline_NIR = B4 + (B11 - B4) * (lambda_NIR - lambda_RED) / (lambda_SWIR - lambda_RED)
+      # For simplicity use B8A (865 nm) as NIR measurement
+    
+#    lambda_nir <- 665
+#    lambda_red <- 865
+#    lambda_swir <- 1610
+    
+#    baseline_nir <- R + (S1 - R) * ((lambda_nir - lambda_red)/(lambda_swir - lambda_red))
+    
+#    fai <- N2 - baseline_nir
+#    names(fai) <- paste0("FAI_", fecha)
+#    FAI_list[[fecha]] <- fai
+    
+    
+    
+    # MCI (simplified) -> height at B5 over baseline between B4 and B6
+    
+#     baseline_b5 <- R + (RE2 - R * ((705 - 665) / (740 - 665)))
+                         
+#     mci <- RE1 - baseline_b5
+#     names(mci) <- paste0("MCI_", fecha)
+#     MCI_list[[fecha]] <- mci
+     
+     
+     
+    # NDTI = (Green - Red) / (Green + Red)
+#     ndti <- (G - N) / (G + N)
+#     names(ndti) <- paste0("NDTI_", fecha)
+#     NDTI_list[[fecha]] <- ndti
+     
+    # NDAVI (example for aquatic vegetation): (NIR - Blue)/(NIR + Blue)
+#    ndavi <- (N2 - B / N2 + B)
+#    names(ndavi) <- paste0("NDAVI_", fecha)
+#    NDAVI_list[[fecha]] <- ndavi
+  
+   
+  }
+  
+  # Convertir listas a SpatRaster con nombres adecuados
+#   MDWI <- rast(MDWI_list); names(MDWI) <- nombres_mdwi
+  NDCI <- rast(NDCI_list); names(NDCI) <- nombres_ndci
+#  FAI <- rast(FAI_list); names(FAI) <- nombres_fai
+#  MCI <- rast(MCI_list); names(MCI) <- nombres_mci  
+#  NDTI <- rast(NDTI_list); names(NDTI) <- nombres_ndti
+#  NDAVI <- rast(NDAVI_list); names(NDAVI) <- nombres_ndavi  
+     
+     
+     
+     
+     
+  # Convertir listas a SpatRaster
+  return(list(
+#     MDWI = rast(MDWI_list),
+    NDCI = rast(NDCI_list)# ,
+#    FAI = rast(FAI_list),
+#    MCI = rast(MCI_list),
+#    NDTI = rast(NDTI_list),
+#    NDAVI = rast(NDAVI_list)
+  ))
+}
+
+
+```
+
+
+
+
+
+
+```{r}
+# Calcular índices
+indices_aqua <- calcular_indices_aqua(s2_stack)
+```
+
+
+```{r index_in_name}
+# names(indices_aqua$MDWI) <- paste0("MDWI_", names(indices_aqua$MDWI))
+ names(indices_aqua$NDCI)  <- paste0("NDCI_",  names(indices_aqua$NDCI))
+# names(indices_aqua$FAI)   <- paste0("FAI_",   names(indices_aqua$FAI))
+# names(indices_aqua$MCI) <- paste0("MCI_", names(indices_aqua$MCI))
+# names(indices_aqua$NDTI)   <- paste0("NDTI_",   names(indices_aqua$NDTI))
+# names(indices_aqua$NDAVI) <- paste0("NDAVI_", names(indices_aqua$NDAVI))
+
+```
+
+
+
+```{r}
+names(indices_aqua$NDCI)
+```
+
+
+### ---------------------------------
+
+```{r}
+# Función: Calcula índices de vegetación
+calcular_indices_aqua <- function(stack) {
+  
+  # Extraer fechas únicas
+  fechas <- unique(str_extract(names(stack), "\\d{4}-\\d{2}-\\d{2}"))
+  
+  # Inicializar listas de resultados
+  MDWI_list <- list()
+  NDCI_list <- list()
+  baseline_NIR <- list()
+  baseline_B5 <- list()
+  FAI_list <- list()
+  MCI_list <- list()
+  NDTI_list <- list()
+  NDAVI_list <- list()
+  
+  
+  
+  
+  nombres_mdwi <- c()
+  nombres_ndci <- c()
+  nombres_fai <- c()
+  nombres_mci <- c()
+  nombres_ndti <- c()
+  nombres_ndavi <- c()
+  
+  
+  
+  
+  for (fecha in fechas) {
+    # Extraer bandas
+    B <- stack[[paste0("B_", fecha)]]
+    G <- stack[[paste0("G_", fecha)]]
+    R <- stack[[paste0("R_", fecha)]]
+    N <- stack[[paste0("N_", fecha)]]
+    N2 <- stack[[paste0("N2_", fecha)]]
+    RE1 <- stack[[paste0("RE1_", fecha)]]
+    RE2 <- stack[[paste0("RE2_", fecha)]]
+    S1 <- stack[[paste0("S1_", fecha)]]
+    
+    # MDWI
+    mdwi <- (G - S1) / (G + S1)
+    names(mdwi) <- paste0("MDWI_", fecha)
+    MDWI_list[[fecha]] <- mdwi
+    
+    # NDCI
+    ndci <- (RE1 - R) / (RE1 +  R )
+    names(ndci) <- paste0("NDCI_", fecha)
+    NDCI_list[[fecha]] <- ndci
+    
+    # FAI
+    
+    # Simplified FAI (approx): 
+      # following Hu (2009) approach — baseline interpolation for NIR
+      # baseline_NIR = B4 + (B11 - B4) * (lambda_NIR - lambda_RED) / (lambda_SWIR - lambda_RED)
+      # For simplicity use B8A (865 nm) as NIR measurement
+    
+    lambda_nir <- 665
+    lambda_red <- 865
+    lambda_swir <- 1610
+    
+    baseline_nir <- R + (S1 - R) * ((lambda_nir - lambda_red)/(lambda_swir - lambda_red))
+    
+    fai <- N2 - baseline_nir
+    names(fai) <- paste0("FAI_", fecha)
+    FAI_list[[fecha]] <- fai
+    
+    
+    
+    # MCI (simplified) -> height at B5 over baseline between B4 and B6
+    
+     baseline_b5 <- R + (RE2 - R * ((705 - 665) / (740 - 665)))
+                         
+     mci <- RE1 - baseline_b5
+     names(mci) <- paste0("MCI_", fecha)
+     MCI_list[[fecha]] <- mci
+     
+     
+     
+    # NDTI = (Green - Red) / (Green + Red)
+     ndti <- (G - N) / (G + N)
+     names(ndti) <- paste0("NDTI_", fecha)
+     NDTI_list[[fecha]] <- ndti
+     
+    # NDAVI (example for aquatic vegetation): (NIR - Blue)/(NIR + Blue)
+    ndavi <- (N2 - B / N2 + B)
+    names(ndavi) <- paste0("NDAVI_", fecha)
+    NDAVI_list[[fecha]] <- ndavi
+  
+   
+  }
+  
+  # Convertir listas a SpatRaster con nombres adecuados
+  MDWI <- rast(MDWI_list)
+  names(MDWI) <- nombres_mdwi
+  
+  NDCI <- rast(NDCI_list)
+  names(NDCI) <- nombres_ndci
+  
+  FAI <- rast(FAI_list)
+  names(FAI) <- nombres_fai
+  
+  MCI <- rast(MCI_list)
+  names(MCI) <- nombres_mci  
+  
+  NDTI <- rast(NDTI_list)
+  names(NDTI) <- nombres_ndti
+  
+  NDAVI <- rast(NDAVI_list)
+  names(NDAVI) <- nombres_ndavi  
+     
+     
+     
+     
+     
+  # Convertir listas a SpatRaster
+  return(list(
+    MDWI = rast(MDWI_list),
+    NDCI = rast(NDCI_list),
+    FAI = rast(FAI_list),
+    MCI = rast(MCI_list),
+    NDTI = rast(NDTI_list),
+    NDAVI = rast(NDAVI_list)
+  ))
+}
+
+
+```
+
+
+
+
+
+
+```{r}
+# Calcular índices
+indices_aqua <- calcular_indices_aqua(s2_stack)
+```
+
+
+```{r index_in_name}
+names(indices_aqua$MDWI) <- paste0("MDWI_", names(indices_aqua$MDWI))
+names(indices_aqua$NDCI)  <- paste0("NDCI_",  names(indices_aqua$NDCI))
+names(indices_aqua$FAI)   <- paste0("FAI_",   names(indices_aqua$FAI))
+names(indices_aqua$MCI) <- paste0("MCI_", names(indices_aqua$MCI))
+names(indices_aqua$NDTI)   <- paste0("NDTI_",   names(indices_aqua$NDTI))
+names(indices_aqua$NDAVI) <- paste0("NDAVI_", names(indices_aqua$NDAVI))
+
+```
+
+
+
+```{r}
+names(indices_aqua$FAI)
+```
+
+
+```{r}
+# Función: Guarda capas raster en archivos GeoTIFF
+guardar_indices <- function(lista_indices, carpeta_salida = "../../process/geoprocess/index_AQUA/") {
+  
+  for (nombre_indice in names(lista_indices)) {
+    indice_raster <- lista_indices[[nombre_indice]]
+    carpeta_indice <- file.path(carpeta_salida, nombre_indice)
+    dir.create(carpeta_indice, recursive = TRUE, showWarnings = FALSE)
+    
+    for (nombre_capa in names(indice_raster)) {
+      archivo <- file.path(carpeta_indice, paste0(nombre_capa, ".tif"))
+      writeRaster(indice_raster[[nombre_capa]], archivo, overwrite = TRUE)
+    }
+  }
+}
+
+```
+
+
+
+```{r}
+# Guardarlos en disco
+guardar_indices(indices_aqua, 
+                carpeta_salida = "../../process/geoprocess/index_AQUA")
+
+```
+
+#### Función para guardar cada stack completo en un solo .tif
+
+```{r}
+# Guarda cada índice como un único archivo multibanda .tif
+guardar_stacks_completos <- function(lista_indices, carpeta_salida = "../../process/geoprocess/index_AQUA/") {
+  
+  dir.create(carpeta_salida, recursive = TRUE, showWarnings = FALSE)
+  
+  for (nombre_indice in names(lista_indices)) {
+    archivo <- file.path(carpeta_salida, paste0(nombre_indice, "_stack.tif"))
+    writeRaster(lista_indices[[nombre_indice]], archivo, overwrite = TRUE)
+  }
+}
+
+
+```
+
+
+
+```{r}
+# Calcular índices (si no lo has hecho ya)
+# indices_veg <- calcular_indices_vegetacion(s2_stack)
+
+# Guardar los stacks completos en la ruta correcta
+guardar_stacks_completos(indices_aqua, carpeta_salida = "../../process/geoprocess/index_AQUA/")
+
+
+```
+
+
+#### PLOTS acuáticos
+
+
+```{r}
+library(RColorBrewer)
+Gr <- colorRampPalette(brewer.pal(9, "Greens"))
+
+```
+
+
+```{r}
+
+plot(indices_aqua$FAI, 
+     range=c(0.1,0.7), # para que tengan todos los plt la misma escala
+     col=Gr(5), # usar la paleta de colores creada,
+     1:nlyr(indices_aqua$FAI))  
+```
+
+
+```{r}
+
+plot(indices_aqua$FAI, 
+     range=c(0.1,0.7), # para que tengan todos los plt la misma escala
+     col=rev(terrain.colors(10)), # usar la paleta de colores creada,
+     1:nlyr(indices_aqua$FAI))  
+```
+
+
+
+
+
+
+
+
+
+
+
+## INDICES DE VEGETACIÓN
+
+```{r}
+calcular_indices_vegetacion <- function(stack) {
+  
+  fechas <- unique(str_extract(names(stack), "\\d{4}-\\d{2}-\\d{2}"))
+  
+  NDVI_list <- list()
+  EVI_list <- list()
+  GNDVI_list <- list()
+  SAVI_list <- list()
+  
+  nombres_ndvi <- c()
+  nombres_evi <- c()
+  nombres_gndvi <- c()
+  nombres_savi <- c()
+  
+  for (fecha in fechas) {
+    B <- stack[[paste0("B_", fecha)]]
+    G <- stack[[paste0("G_", fecha)]]
+    R <- stack[[paste0("R_", fecha)]]
+    N <- stack[[paste0("N_", fecha)]]
+    
+    # NDVI
+    ndvi <- (N - R) / (N + R)
+    NDVI_list[[fecha]] <- ndvi
+    nombres_ndvi <- c(nombres_ndvi, paste0("NDVI_", fecha))
+    
+    # EVI
+    evi <- 2.5 * (N - R) / (N + 6 * R - 7.5 * B + 1)
+    EVI_list[[fecha]] <- evi
+    nombres_evi <- c(nombres_evi, paste0("EVI_", fecha))
+    
+    # GNDVI
+    gndvi <- (N - G) / (N + G)
+    GNDVI_list[[fecha]] <- gndvi
+    nombres_gndvi <- c(nombres_gndvi, paste0("GNDVI_", fecha))
+    
+    # SAVI
+    L <- 0.5
+    savi <- ((N - R) / (N + R + L)) * (1 + L)
+    SAVI_list[[fecha]] <- savi
+    nombres_savi <- c(nombres_savi, paste0("SAVI_", fecha))
+  }
+  
+  # Convertir listas a SpatRaster con nombres adecuados
+  NDVI <- rast(NDVI_list); names(NDVI) <- nombres_ndvi
+  EVI <- rast(EVI_list); names(EVI) <- nombres_evi
+  GNDVI <- rast(GNDVI_list); names(GNDVI) <- nombres_gndvi
+  SAVI <- rast(SAVI_list); names(SAVI) <- nombres_savi
+  
+  return(list(
+    NDVI = NDVI,
+    EVI = EVI,
+    GNDVI = GNDVI,
+    SAVI = SAVI
+  ))
+}
+
+```
+
+
+---------------------------
+
+```{r}
+# Función: Calcula índices de vegetación
+calcular_indices_vegetacion <- function(stack) {
+  
+  # Extraer fechas únicas
+  fechas <- unique(str_extract(names(stack), "\\d{4}-\\d{2}-\\d{2}"))
+  
+  # Inicializar listas de resultados
+  NDVI_list <- list()
+  EVI_list <- list()
+  GNDVI_list <- list()
+  SAVI_list <- list()
+  
+  for (fecha in fechas) {
+    # Extraer bandas
+    B <- stack[[paste0("B_", fecha)]]
+    G <- stack[[paste0("G_", fecha)]]
+    R <- stack[[paste0("R_", fecha)]]
+    N <- stack[[paste0("N_", fecha)]]
+    
+    # NDVI
+    ndvi <- (N - R) / (N + R)
+    names(ndvi) <- paste0("NDVI_", fecha)
+    NDVI_list[[fecha]] <- ndvi
+    
+    # EVI
+    evi <- 2.5 * (N - R) / (N + 6 * R - 7.5 * B + 1)
+    names(evi) <- paste0("EVI_", fecha)
+    EVI_list[[fecha]] <- evi
+    
+    # GNDVI
+    gndvi <- (N - G) / (N + G)
+    names(gndvi) <- paste0("GNDVI_", fecha)
+    GNDVI_list[[fecha]] <- gndvi
+    
+    # SAVI (L = 0.5)
+    L <- 0.5
+    savi <- ((N - R) / (N + R + L)) * (1 + L)
+    names(savi) <- paste0("SAVI_", fecha)
+    SAVI_list[[fecha]] <- savi
+  }
+  
+  # Convertir listas a SpatRaster
+  return(list(
+    NDVI = rast(NDVI_list),
+    EVI = rast(EVI_list),
+    GNDVI = rast(GNDVI_list),
+    SAVI = rast(SAVI_list)
+  ))
+}
+
+
+```
+
+
+
+
+
+
+```{r}
+# Calcular índices
+indices_veg <- calcular_indices_vegetacion(s2_stack)
+```
+
+
+```{r index_in_name}
+names(indices_veg$NDVI) <- paste0("NDVI_", names(indices_veg$NDVI))
+names(indices_veg$SAVI)  <- paste0("SAVI_",  names(indices_veg$SAVI))
+names(indices_veg$EVI)   <- paste0("EVI_",   names(indices_veg$EVI))
+names(indices_veg$GNDVI) <- paste0("GNDVI_", names(indices_veg$GNDVI))
+
+```
+
+
+
+```{r}
+names(indices_veg$NDVI)
+```
+
+
+```{r}
+# Función: Guarda capas raster en archivos GeoTIFF
+guardar_indices <- function(lista_indices, carpeta_salida = "../../process/geoprocess/index_VEG/") {
+  
+  for (nombre_indice in names(lista_indices)) {
+    indice_raster <- lista_indices[[nombre_indice]]
+    carpeta_indice <- file.path(carpeta_salida, nombre_indice)
+    dir.create(carpeta_indice, recursive = TRUE, showWarnings = FALSE)
+    
+    for (nombre_capa in names(indice_raster)) {
+      archivo <- file.path(carpeta_indice, paste0(nombre_capa, ".tif"))
+      writeRaster(indice_raster[[nombre_capa]], archivo, overwrite = TRUE)
+    }
+  }
+}
+
+```
+
+
+
+```{r}
+# Guardarlos en disco
+guardar_indices(indices_veg, 
+                carpeta_salida = "../../process/geoprocess/index_VEG/")
+
+```
+
+#### Función para guardar cada stack completo en un solo .tif
+
+```{r}
+# Guarda cada índice como un único archivo multibanda .tif
+guardar_stacks_completos <- function(lista_indices, carpeta_salida = "../../process/geoprocess/index_VEG/") {
+  
+  dir.create(carpeta_salida, recursive = TRUE, showWarnings = FALSE)
+  
+  for (nombre_indice in names(lista_indices)) {
+    archivo <- file.path(carpeta_salida, paste0(nombre_indice, "_stack.tif"))
+    writeRaster(lista_indices[[nombre_indice]], archivo, overwrite = TRUE)
+  }
+}
+
+
+```
+
+
+
+```{r}
+# Calcular índices (si no lo has hecho ya)
+# indices_veg <- calcular_indices_vegetacion(s2_stack)
+
+# Guardar los stacks completos en la ruta correcta
+guardar_stacks_completos(indices_veg, carpeta_salida = "../../process/geoprocess/index_VEG/")
+
+
+```
+
+
+#### PLOTS Vegetation
+
+
+```{r}
+library(RColorBrewer)
+Gr <- colorRampPalette(brewer.pal(9, "Greens"))
+
+```
+
+
+```{r}
+
+plot(indices_veg$SAVI, 
+     range=c(0.1,0.7), # para que tengan todos los plt la misma escala
+     col=Gr(5), # usar la paleta de colores creada,
+     1:nlyr(indices_veg$SAVI))  
+```
+
+
+```{r}
+
+plot(indices_veg$SAVI, 
+     range=c(0.1,0.7), # para que tengan todos los plt la misma escala
+     col=rev(terrain.colors(10)), # usar la paleta de colores creada,
+     1:nlyr(indices_veg$SAVI))  
+```
+
+
+
+## INDICES HÍDRICOS
+
+```{r}
+calcular_indices_hidricos <- function(stack) {
+  
+  fechas <- unique(str_extract(names(stack), "\\d{4}-\\d{2}-\\d{2}"))
+  
+  NDMI_list <- list()
+  NDWI_list <- list()
+  MNDWI_list <- list()
+  nombres_ndmi <- c()
+  nombres_ndwi <- c()
+  nombres_mndwi <- c()
+  
+  for (fecha in fechas) {
+    G <- stack[[paste0("G_", fecha)]]
+    N <- stack[[paste0("N_", fecha)]]
+    S1 <- stack[[paste0("S1_", fecha)]]
+    
+    # NDMI
+    ndmi <- (N - S1) / (N + S1)
+    NDMI_list[[fecha]] <- ndmi
+    nombres_ndmi <- c(nombres_ndmi, paste0("NDMI_", fecha))
+    
+    # NDWI
+    ndwi <- (G - N) / (G + N)
+    NDWI_list[[fecha]] <- ndwi
+    nombres_ndwi <- c(nombres_ndwi, paste0("NDWI_", fecha))
+    
+    # MNDWI
+    mndwi <- (G - S1) / (G + S1)
+    MNDWI_list[[fecha]] <- mndwi
+    nombres_mndwi <- c(nombres_mndwi, paste0("MNDWI_", fecha))
+  }
+  
+  # Convertir listas a SpatRaster y asignar nombres correctos
+  NDMI <- rast(NDMI_list); names(NDMI) <- nombres_ndmi
+  NDWI <- rast(NDWI_list); names(NDWI) <- nombres_ndwi
+  MNDWI <- rast(MNDWI_list); names(MNDWI) <- nombres_mndwi
+  
+  return(list(
+    NDMI = NDMI,
+    NDWI = NDWI,
+    MNDWI = MNDWI
+  ))
+}
+
+```
+
+
+```{r}
+# Calcular índices hídricos
+indices_hidro <- calcular_indices_hidricos(s2_stack)
+```
+
+
+
+#### Guardar capas individuales (una por fecha)
+
+
+
+```{r}
+guardar_indices <- function(lista_indices, 
+                            carpeta_salida = "../../process/geoprocess/index_HIDRO/") {
+  
+  for (nombre_indice in names(lista_indices)) {
+    indice_raster <- lista_indices[[nombre_indice]]
+    carpeta_indice <- file.path(carpeta_salida, nombre_indice)
+    dir.create(carpeta_indice, recursive = TRUE, showWarnings = FALSE)
+    
+    for (nombre_capa in names(indice_raster)) {
+      archivo <- file.path(carpeta_indice, paste0(nombre_capa, ".tif"))
+      writeRaster(indice_raster[[nombre_capa]], archivo, overwrite = TRUE)
+    }
+  }
+}
+
+```
+
+```{r}
+# Guardar por capas individuales
+guardar_indices(indices_hidro, carpeta_salida = "../../process/geoprocess/index_HIDRO/")
+
+```
+
+
+#### Guardar cada stack completo
+
+
+```{r}
+guardar_stacks_completos <- function(lista_indices, carpeta_salida = "../../process/geoprocess/index_HIDRO/") {
+  
+  dir.create(carpeta_salida, recursive = TRUE, showWarnings = FALSE)
+  
+  for (nombre_indice in names(lista_indices)) {
+    archivo <- file.path(carpeta_salida, paste0(nombre_indice, "_stack.tif"))
+    writeRaster(lista_indices[[nombre_indice]], archivo, overwrite = TRUE)
+  }
+}
+
+
+```
+
+```{r}
+
+# Guardar cada stack completo
+guardar_stacks_completos(indices_hidro, 
+                         carpeta_salida = "../../process/geoprocess/index_HIDRO/")
+```
+
+
+
+```{r}
+
+# Define tu paleta personalizada con rojo, amarillo y azul
+MiPaletaRYA <- colorRampPalette(brewer.pal(11, "RdYlBu")) #  colorRampPalette(c("red", "yellow", "blue1"))
+
+# Puedes probar tu paleta generando un número de colores, por ejemplo 9
+colores_generados <- MiPaletaRYA(9)
+print(colores_generados)
+
+# Para visualizar los colores (opcional)
+pie(rep(1, length(colores_generados)), col = colores_generados, labels = paste("Color", 1:length(colores_generados)))
+```
+
+
+```{r}
+
+plot(indices_hidro$NDMI, 
+     range=c(0,0.21), # para que tengan todos los plt la misma escala
+     col=MiPaletaRYA(3), # usar la paleta de colores creada,
+     1:nlyr(indices_hidro$NDMI))  
+```
+
+
+
+## ÍNDICES DE INCENDIO
+
+SEVERIDAD DEL FUEGO (PRE-POST FIRE)
+
+```{r}
+calcular_indices_incendios <- function(stack) {
+  
+  fechas <- unique(str_extract(names(stack), "\\d{4}-\\d{2}-\\d{2}"))
+  
+  NBR_list <- list()
+  BAI_list <- list()
+  
+  nombres_nbr <- c()
+  nombres_bai <- c()
+  
+  for (fecha in fechas) {
+    R <- stack[[paste0("R_", fecha)]]
+    N <- stack[[paste0("N_", fecha)]]
+    S1 <- stack[[paste0("S1_", fecha)]]
+    
+    # NBR: (NIR - SWIR) / (NIR + SWIR)
+    nbr <- (N - S1) / (N + S1)
+    NBR_list[[fecha]] <- nbr
+    nombres_nbr <- c(nombres_nbr, paste0("NBR_", fecha))
+    
+    # BAI: 1 / ((0.1 - R)^2 + (0.06 - N)^2)
+    bai <- 1 / ((0.1 - R)^2 + (0.06 - N)^2)
+    BAI_list[[fecha]] <- bai
+    nombres_bai <- c(nombres_bai, paste0("BAI_", fecha))
+  }
+  
+  NBR <- rast(NBR_list); names(NBR) <- nombres_nbr
+  BAI <- rast(BAI_list); names(BAI) <- nombres_bai
+  
+  return(list(
+    NBR = NBR,
+    BAI = BAI
+  ))
+}
+
+
+```
+
+```{r}
+carpeta_salida = "../../process/geoprocess/index_FIRE/"
+
+```
+
+```{r}
+indices_fuego <- calcular_indices_incendios(s2_stack)
+```
+
+```{r}
+
+guardar_indices(indices_fuego, carpeta_salida = "../../process/geoprocess/index_FIRE/")
+
+
+
+guardar_stacks_completos(indices_fuego, carpeta_salida = "../../process/geoprocess/index_FIRE/")
+
+
+```
+
+
+
+## Exportación PNG
+
+
+### Imágenes Índices acuáticos
+
+```{r}
+# Paleta y cortes comunes
+colores_aqua <- c("red", "orange", "yellow", "lightgreen", "forestgreen")
+cortes_aqua <- c(-Inf, 0, 0.1, 0.2, 0.4, Inf)
+etiquetas_leyenda <- c("< 0", "0 – 0.1", "0.1 – 0.2", "0.2 – 0.4", "> 0.4")
+```
+
+
+
+
+```{r}
+# Ruta base de salida
+carpeta_base <- "../../process/figures/index_AQUA/"
+
+# Iterar sobre cada índice de vegetación
+for (nombre_indice in names(indices_aqua)) {
+  
+  stack_indice <- indices_aqua[[nombre_indice]]
+  
+  # Crear subcarpeta si no existe
+  carpeta_indice <- file.path(carpeta_base, nombre_indice)
+  dir.create(carpeta_indice, recursive = TRUE, showWarnings = FALSE)
+  
+  # Iterar por capa/fecha
+  for (i in 1:nlyr(stack_indice)) {
+    
+    capa <- stack_indice[[i]]
+    fecha <- names(capa)
+    
+    archivo_png <- file.path(carpeta_indice, paste0(fecha, ".png"))
+    
+    png(archivo_png, width = 1000, height = 1000, res = 150)
+    
+    par(mar = c(4, 4, 4, 10))
+    
+    # Plot sin leyenda
+    plot(capa,
+         col = colores_aqua,
+         breaks = cortes_aqua,
+         main = paste0(fecha),
+         # main = paste0(nombre_indice, " - ", fecha),
+         axes = FALSE,
+         legend = FALSE)
+    
+    # Leyenda personalizada
+    legend("topright",
+           legend = etiquetas_leyenda,
+           fill = colores_aqua,
+           title = paste0("Valores del ", nombre_indice),
+           cex = 0.72,
+           bty = "n",
+           inset = c(0.05, 0))
+    
+    dev.off()
+  }
+}
+```
+
+
+### Imágenes Índices de vegetación
+
+```{r}
+# Paleta y cortes comunes
+colores_veg <- c("red", "orange", "yellow", "lightgreen", "forestgreen")
+cortes_veg <- c(-Inf, 0, 0.1, 0.2, 0.4, Inf)
+etiquetas_leyenda <- c("< 0", "0 – 0.1", "0.1 – 0.2", "0.2 – 0.4", "> 0.4")
+```
+
+
+
+
+```{r}
+# Ruta base de salida
+carpeta_base <- "../../process/figures/index_VEG/"
+
+# Iterar sobre cada índice de vegetación
+for (nombre_indice in names(indices_veg)) {
+  
+  stack_indice <- indices_veg[[nombre_indice]]
+  
+  # Crear subcarpeta si no existe
+  carpeta_indice <- file.path(carpeta_base, nombre_indice)
+  dir.create(carpeta_indice, recursive = TRUE, showWarnings = FALSE)
+  
+  # Iterar por capa/fecha
+  for (i in 1:nlyr(stack_indice)) {
+    
+    capa <- stack_indice[[i]]
+    fecha <- names(capa)
+    
+    archivo_png <- file.path(carpeta_indice, paste0(fecha, ".png"))
+    
+    png(archivo_png, width = 1000, height = 1000, res = 150)
+    
+    par(mar = c(4, 4, 4, 10))
+    
+    # Plot sin leyenda
+    plot(capa,
+         col = colores_veg,
+         breaks = cortes_veg,
+         main = paste0(fecha),
+         # main = paste0(nombre_indice, " - ", fecha),
+         axes = FALSE,
+         legend = FALSE)
+    
+    # Leyenda personalizada
+    legend("topright",
+           legend = etiquetas_leyenda,
+           fill = colores_veg,
+           title = paste0("Valores del ", nombre_indice),
+           cex = 0.72,
+           bty = "n",
+           inset = c(0.05, 0))
+    
+    dev.off()
+  }
+}
+```
+
+
+### Imágenes Índices Hídricos
+
+```{r}
+# Paleta y cortes para índices hídricos
+colores_hidro <- c("red", "orange", "yellow", "lightblue", "blue")
+cortes_hidro <- c(-Inf, -0.25, -0.1, 0, 0.1, Inf)
+etiquetas_hidro <- c("< -0.5", "-0.5 – 0", "0 – 0.5", "0.5 – 1.0", "> 1.0")
+```
+
+
+
+```{r}
+# Ruta base de salida
+carpeta_base_hidro <- "../../process/figures/index_HIDRO/"
+```
+
+```{r}
+
+# Iterar sobre cada índice hídrico
+for (nombre_indice in names(indices_hidro)) {
+  
+  stack_indice <- indices_hidro[[nombre_indice]]
+  
+  # Crear subcarpeta si no existe
+  carpeta_indice <- file.path(carpeta_base_hidro, nombre_indice)
+  dir.create(carpeta_indice, recursive = TRUE, showWarnings = FALSE)
+  
+  # Iterar por capa/fecha
+  for (i in 1:nlyr(stack_indice)) {
+    
+    capa <- stack_indice[[i]]
+    fecha <- names(capa)
+    
+    archivo_png <- file.path(carpeta_indice, paste0(fecha, ".png"))
+    
+    png(archivo_png, width = 1000, height = 1000, res = 150)
+    
+    par(mar = c(4, 4, 4, 10))  # margen derecho más amplio
+    
+    # Plot sin leyenda
+    plot(capa,
+         col = colores_hidro,
+         breaks = cortes_hidro,
+         main = paste0(fecha),
+         # main = paste0(nombre_indice, " - ", fecha),
+         axes = FALSE,
+         legend = FALSE)
+    
+    # Leyenda personalizada
+    legend("topright",
+           legend = etiquetas_hidro,
+           fill = colores_hidro,
+           title = paste0("Valores del ", nombre_indice),
+           cex = 0.72,
+           bty = "n",
+           inset = c(0.05, 0))
+    
+    dev.off()
+  }
+}
+```
+
+
+
+### Imágenes Índices de Incendios
+
+```{r}
+# Paleta y clases para índices de incendios
+colores_incendio <- c("brown","orange", "wheat", "yellow", "green","green3", "forestgreen")
+cortes_incendio <- c(-Inf, 0, 0.05, 0.15, 0.3, 0.45,0.85, Inf)
+etiquetas_incendio <- c("Muy alto",
+                        "Alto",
+                        "Bastante",
+                        "Poco",
+                        "Regeneración",
+                        "Sana")
+
+```
+
+
+```{r}
+# Ruta base de salida
+carpeta_base_fire <- "../../process/figures/index_FIRE/"
+
+```
+
+```{r}
+# Iterar sobre cada índice de incendios
+for (nombre_indice in names(indices_fuego)) {
+  
+  stack_indice <- indices_fuego[[nombre_indice]]
+  
+  # Crear subcarpeta si no existe
+  carpeta_indice <- file.path(carpeta_base_fire, nombre_indice)
+  dir.create(carpeta_indice, recursive = TRUE, showWarnings = FALSE)
+  
+  # Iterar por capa/fecha
+  for (i in 1:nlyr(stack_indice)) {
+    
+    capa <- stack_indice[[i]]
+    fecha <- names(capa)
+    
+    archivo_png <- file.path(carpeta_indice, paste0(fecha, ".png"))
+    
+    png(archivo_png, width = 1000, height = 1000, res = 150)
+    
+    par(mar = c(4, 4, 4, 10))  # margen derecho ampliado
+    
+    # Plot sin leyenda
+    plot(capa,
+         col = colores_incendio,
+         breaks = cortes_incendio,
+         main = paste0(fecha),
+         #main = paste0(nombre_indice, " - ", fecha),
+         axes = FALSE,
+         legend = FALSE)
+    
+    # Leyenda clara y separada
+    legend("topright",
+           legend = etiquetas_incendio,
+           fill = colores_incendio,
+           title = paste0("Valores del ", nombre_indice),
+           cex = 0.72,
+           bty = "n",
+           inset = c(0.05, 0))
+    
+    dev.off()
+  }
+}
+```
+
+
+
+
+
+
+
+
